@@ -1,0 +1,36 @@
+{
+  "name": "@mlmcps/sdd-mcp",
+  "version": "0.19.0",
+  "description": "Read-only MCP server for spec-driven development: estate contract lookup, knowledge-layer checks, and spec inventory over a local repo.",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "bin": {
+    "sdd-mcp": "mcp/sdd-server.mjs"
+  },
+  "files": [
+    "mcp/",
+    "scripts/lib/",
+    "templates/ci/knowledge-check.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MLMCPS/ace-claude-plugins.git",
+    "directory": "sdd-toolkit"
+  },
+  "keywords": [
+    "mcp",
+    "spec-driven-development",
+    "claude"
+  ],
+  "dependencies": {}
+}
