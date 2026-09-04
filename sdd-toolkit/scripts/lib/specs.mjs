@@ -9,6 +9,37 @@ import { join } from 'node:path';
 
 export const LIFECYCLE = ['Draft', 'Approved', 'Implemented', 'Verified', 'Archived'];
 
+// `- [ ] **AC1** — text`, and the plainer `- [ ] AC-1: text`. Both appear in the
+// wild: the template writes the first, people hand-write the second.
+const AC_LINE = /^\s*-\s*\[([ xX])\]\s*(?:\*\*)?AC-?(\d+)(?:\*\*)?\s*[—–:-]\s*(.+?)\s*$/gm;
+
+/** Acceptance criteria as structured rows, so a script can pair each with a test case. */
+export function parseCriteria(text) {
+  const out = [];
+  for (const m of text.matchAll(AC_LINE)) {
+    out.push({
+      id: `AC-${Number(m[2])}`,
+      ordinal: Number(m[2]),
+      text: m[3],
+      checked: m[1].toLowerCase() === 'x',
+    });
+  }
+  return out.sort((a, b) => a.ordinal - b.ordinal);
+}
+
+// Template placeholders must read as absent. `<repo or service name>` treated as
+// a real repo would fan a pull request out to a repository that does not exist.
+const PLACEHOLDER = /^(<.*>|_TBD_|—|-|n\/?a|none|tbd)$/i;
+
+/** A comma- or slash-separated header cell as a clean list. */
+export function splitCell(value) {
+  if (!value) return [];
+  return value
+    .split(/[,/]/)
+    .map((v) => v.replace(/[`*]/g, '').trim())
+    .filter((v) => v && !PLACEHOLDER.test(v));
+}
+
 // A spec id is digits plus an OPTIONAL letter: 0165 and 0165b are different specs, not a clash.
 const SPEC_FILE = /^(\d{4}[a-z]?)-(.+)\.md$/;
 
@@ -78,6 +109,7 @@ export function listSpecs(root = process.cwd()) {
       const resolved = resolveStatus(plain);
 
       const boxes = [...text.matchAll(/^\s*-\s*\[([ xX])\]/gm)];
+      const criteria = parseCriteria(text);
 
       out.push({
         file: `${dir}/${f}`,
@@ -95,6 +127,13 @@ export function listSpecs(root = process.cwd()) {
         acTotal: boxes.length,
         acChecked: boxes.filter((b) => b[1].toLowerCase() === 'x').length,
         archived: dir.endsWith('archive'),
+        // Added for the traceability and brief scripts. Existing fields are
+        // untouched — the MCP server and the dashboard both read this shape.
+        criteria,
+        repos: splitCell(field('Project / service') ?? field('Project') ?? field('Repos')),
+        nfrs: splitCell(field('NFRs') ?? field('NFR')),
+        approvedBy: field('Approved by') ?? field('Approver'),
+        author: field('Author'),
       });
     }
   }

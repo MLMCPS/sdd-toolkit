@@ -5,14 +5,13 @@ custom agent, a CI script — can use it without a model in the loop.
 
 Everything here is **read-only**. No tool writes, moves, or deletes anything.
 
-## Why only these four
+## What ports, and what doesn't
 
-The plugin's value is its agents, skills, and hooks. None of those have an MCP equivalent: MCP
-can't spawn a subagent with its own tool allowlist and model, and it can't register a
-`SessionStart` or `PreToolUse` hook. Rebuilding the toolkit as an MCP server would throw away the
-adversarial reviewers and both hooks.
+Skills and hooks have no MCP equivalent: MCP cannot register a `SessionStart` or `PreToolUse`
+hook, and it cannot spawn a subagent with its own tool allowlist and model. Those stay in the
+plugin, and so does the real subagent execution the commands rely on.
 
-What *does* port cleanly is the computation — the parts that read files and return facts, where a
+Two things do port. First, the computation — the parts that read files and return facts, where a
 model adds nothing:
 
 | Tool | Answers |
@@ -23,6 +22,17 @@ model adds nothing:
 | `spec_next_number` | What's the next free spec number **across all branches**? |
 
 Templates are also served as resources under `sdd://templates/…`.
+
+Second, the **commands**, served as MCP prompts — all 18 of them, described from their own
+frontmatter, with `$ARGUMENTS` filled in at `prompts/get`. Clients namespace these, so `spec`
+arrives as `/mcp__sdd-toolkit__spec` rather than `/spec`; that is the client's doing, not a choice
+made here.
+
+Where a command delegates to an agent, that agent's instructions are appended to the prompt as an
+appendix, because a client with no subagent mechanism would otherwise skip the step silently — a
+command that appears to run while quietly dropping its adversarial pass is worse than one that
+fails. Inline execution loses the isolated context, tool restrictions and parallelism the plugin
+gets. `/spec-fanout` degrades most, being parallel by design.
 
 `estate_lookup` returns `present: false` with an explicit note when the repo has no estate index.
 That distinction is the whole point: "no index" is not "no consumers", and a false all-clear on a

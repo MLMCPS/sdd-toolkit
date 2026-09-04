@@ -3,10 +3,11 @@
 //
 //   node sdd-server.mjs [--root <repo path>]     (stdio transport; --root defaults to cwd)
 //
-// Why this exists alongside the plugin: the plugin's value is its agents, skills, and hooks,
-// none of which have an MCP equivalent — those stay Claude Code. But the parts that are pure
-// computation over a repo's files are useful to *any* agent in any tool, and shouldn't need a
-// model to run. Those live here.
+// Why this exists alongside the plugin: the parts that are pure computation over a repo's files
+// are useful to *any* agent in any tool, and shouldn't need a model to run. Those are the tools.
+// The commands are exposed too, as MCP prompts (see below), with the agents they delegate to
+// inlined into them. Skills and hooks have no MCP equivalent at all — those stay Claude Code,
+// and so does the real subagent execution the plugin gets.
 //
 // Everything is READ-ONLY. No tool writes, moves, or deletes anything. Writing is the plugin's
 // job, where a human is in the loop to approve it.
@@ -32,7 +33,7 @@ const ROOT = rootFlag !== -1 ? argv[rootFlag + 1] : process.cwd();
 // Version skew is the predictable failure of distributing this: one teammate on a stale npx
 // cache, another on a fresh plugin update, both reporting different answers. Make "what am I
 // actually running?" a one-liner rather than an archaeology exercise.
-const VERSION = '0.19.0';
+const VERSION = '0.21.0';
 if (argv.includes('--version') || argv.includes('-v')) {
   console.log(`sdd-mcp ${VERSION}  (${fileURLToPath(import.meta.url)})`);
   process.exit(0);
@@ -345,6 +346,103 @@ function readResource(uri) {
   return readFileSync(path, 'utf8');
 }
 
+// --- prompts: the plugin's slash commands ------------------------------------
+// commands/ is the plugin's other half, and it is already the shape of an MCP prompt: YAML
+// frontmatter (description, argument-hint) over a markdown body with a $ARGUMENTS placeholder.
+// Exposing it here is what lets a non-Claude-Code client run /spec, /code and the rest.
+//
+// The client namespaces these, so `spec` arrives as `/mcp__sdd-toolkit__spec`, not `/spec`.
+// That is the client's doing and cannot be opted out of.
+//
+// Agents have NO MCP equivalent, and several commands delegate real work to one. Rather than
+// let those steps silently no-op, any agent a command names in bold is appended to the prompt
+// as an appendix — so a client without subagents still gets the instructions. It runs them
+// inline, losing the isolated context, tool restrictions and parallelism the plugin gets.
+// /spec-fanout degrades the most; it is parallel-by-design.
+
+const COMMANDS_DIR = join(HERE, '..', 'commands');
+const AGENTS_DIR = join(HERE, '..', 'agents');
+
+// Deliberately not a YAML parser. Every key in commands/ and agents/ is a flat `key: scalar`
+// on one line; anything richer would be a new convention, not a parsing problem.
+function parseFrontmatter(src) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(src);
+  if (!m) return { meta: {}, body: src };
+  const meta = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z][\w-]*):\s*(.*)$/.exec(line);
+    if (kv) meta[kv[1]] = kv[2].trim();
+  }
+  return { meta, body: src.slice(m[0].length) };
+}
+
+// Commands name an agent in bold prose: "Spawn the **sdd-spec-reviewer** agent on the file".
+// Match that rather than inventing a machine-readable field the plugin does not use, so the
+// two halves cannot drift apart.
+function agentAppendix(body) {
+  if (!existsSync(AGENTS_DIR)) return '';
+  const parts = [];
+  for (const f of readdirSync(AGENTS_DIR).filter((n) => n.endsWith('.md')).sort()) {
+    const slug = basename(f, '.md');
+    if (!body.includes(`**${slug}**`)) continue;
+    const { body: agentBody } = parseFrontmatter(readFileSync(join(AGENTS_DIR, f), 'utf8'));
+    parts.push(`### Agent: ${slug}\n\n${agentBody.trim()}`);
+  }
+  if (!parts.length) return '';
+  return [
+    '\n\n---\n',
+    '## Inlined agent instructions',
+    '',
+    'The steps above delegate to subagents. This client has no subagent mechanism, so each',
+    'referenced agent is reproduced below — follow its instructions inline, in the same order',
+    'the steps call for, keeping its stated scope and restrictions.',
+    '',
+    parts.join('\n\n'),
+  ].join('\n');
+}
+
+let PROMPTS = null;
+function loadPrompts() {
+  if (PROMPTS) return PROMPTS;
+  PROMPTS = [];
+  if (!existsSync(COMMANDS_DIR)) return PROMPTS;
+  for (const f of readdirSync(COMMANDS_DIR).filter((n) => n.endsWith('.md')).sort()) {
+    const name = basename(f, '.md');
+    const { meta, body } = parseFrontmatter(readFileSync(join(COMMANDS_DIR, f), 'utf8'));
+    PROMPTS.push({
+      name,
+      description: meta.description ?? `sdd-toolkit /${name}`,
+      hint: meta['argument-hint'] ?? '',
+      takesArgs: body.includes('$ARGUMENTS'),
+      body,
+    });
+  }
+  return PROMPTS;
+}
+
+// Never `required: true`. Four commands take no arguments at all, and a client that blocks on
+// a required field it cannot fill turns a working prompt into a dead menu entry.
+function listPrompts() {
+  return loadPrompts().map((p) => ({
+    name: p.name,
+    description: p.description,
+    arguments: p.takesArgs
+      ? [{ name: 'arguments', description: p.hint || 'arguments for this command', required: false }]
+      : [],
+  }));
+}
+
+function getPrompt(name, args) {
+  const p = loadPrompts().find((x) => x.name === name);
+  if (!p) throw new Error(`no such prompt: ${name}`);
+  const given = typeof args?.arguments === 'string' ? args.arguments.trim() : '';
+  const text = p.body.split('$ARGUMENTS').join(given) + agentAppendix(p.body);
+  return {
+    description: p.description,
+    messages: [{ role: 'user', content: { type: 'text', text } }],
+  };
+}
+
 // --- JSON-RPC over stdio ----------------------------------------------------
 
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
@@ -361,7 +459,7 @@ function handle(msg) {
       case 'initialize':
         return ok(id, {
           protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : PROTOCOL_VERSION,
-          capabilities: { tools: {}, resources: {} },
+          capabilities: { tools: {}, resources: {}, prompts: {} },
           serverInfo: { name: 'sdd-toolkit', version: VERSION },
         });
 
@@ -378,6 +476,12 @@ function handle(msg) {
 
       case 'resources/list':
         return ok(id, { resources: listResources() });
+
+      case 'prompts/list':
+        return ok(id, { prompts: listPrompts() });
+
+      case 'prompts/get':
+        return ok(id, getPrompt(params?.name, params?.arguments ?? {}));
 
       case 'resources/read':
         return ok(id, {

@@ -124,6 +124,18 @@ The loop: `/spec` → `/spec-review` → `/spec-advance Approved` → `/spec-bui
   `docs/ESTATE.md`, classifies each as additive / sequenced / breaking, and gives the safe deploy
   order. If the estate index is empty it says so rather than reporting "nothing affected" — a false
   all-clear here is worse than no answer. Nothing else in the loop looks outside this repo.
+- `/nfr` — non-functional requirements are the ones most likely to be agreed and then lost, because
+  they do not decompose into user stories: a story breakdown flattens them into prose nothing checks.
+  This compiles each into the two things that *do* enforce it — a standing constraint in
+  `docs/CONSTRAINTS.md` that the next `/spec` carries into the document automatically, and a blocking
+  pipeline gate. An NFR with no machine-checkable threshold is **refused**, because one nothing can
+  fail is not a requirement.
+- `/spec-fanout <spec-id> <contract...>` — one spec, N repos, N pull requests, all on the same derived
+  branch name, so a change spanning four services is provably one change rather than four a reviewer
+  correlates by hand. Uses `docs/ESTATE.md` to find the consumers, including the service one hop out
+  that nobody remembered. Plans first, then `--dry-run` prints the exact requests, then opens them.
+  Partial failure is reported, not thrown — a permissions error on the fourth repo must not hide that
+  three succeeded.
 - `/sdd-rollout <parent-dir>` — onboard a whole estate without spraying the expensive part. Surveys
   every repo mechanically first (free — no model), classifies each as init / adopt / refresh /
   review, orders them by cross-service surface so the repos that unlock `/sdd-impact` for their
@@ -171,6 +183,35 @@ the mechanical half of `/sdd-doctor`; the judgment half stays a human-run comman
 repo with existing drift? Start with `--warn-only`, clear the backlog with `/sdd-refresh`, then drop
 the flag — a gate that fails on day one gets disabled on day two.
 
+**Deterministic checks** (`scripts/`) — the half of the loop that must not be a model call. A merge
+gate has to give the same verdict every run, with no API key and no network, and *"the gate passed
+because the model said so"* is not an audit trail. All pure Node, no dependencies, and each exits
+non-zero so it can fail a build:
+- `spec-gate.mjs` — the mechanical evidence a lifecycle transition claims (named tests exist, git
+  state, required sections). Used by `/spec-advance`.
+- `spec-trace.mjs` — the chain from ticket to test case. Distinguishes **broken** from
+  **unverifiable**: a Ticket typed into the header table cannot be checked from inside the repo, and
+  counting it as passing would make the report a lie.
+- `nfr-compile.mjs` — see `/nfr`.
+- `spec-brief.mjs` — packages an approved spec for an implementer: criteria paired with reserved
+  test-case ids, constraints in force, and the gates that will fail the build. Deliberately **not a
+  prompt** — the same document for a person or an agent, because anything an agent needs that a new
+  engineer would not is a sign the spec is underspecified.
+- `tracker-sync.mjs` — governed sync with Azure DevOps or Jira. The spec owns the contract; the
+  tracker owns status, assignee and sprint. Neither writes the other's fields.
+- `spec-fanout.mjs` — see `/spec-fanout`.
+- `branch-policy.mjs` — install and audit the branch policy that makes a pipeline into a gate.
+  `install` cannot produce an advisory gate; `audit` treats advisory, disabled, `manualQueueOnly` and
+  GitHub's `enforce_admins:false` as blockers, because a gate quietly demoted to optional is how this
+  kind of governance dies.
+- `fix-specs.mjs`, `survey-estate.mjs` — spec hygiene repair, and cheap estate triage before
+  `/sdd-rollout`.
+
+> The tracker and source-control clients are **contract-tested, not integration-tested**: they build
+> what ADO 7.1, Jira Cloud v3 and GitHub 2022-11-28 document, verified offline against a recording
+> transport. None has run against a live organisation. Every write path has `--dry-run`, which prints
+> the exact requests and needs no credentials — useful to hand whoever has to approve the token.
+
 **Dashboard generator** (`scripts/spec-dashboard.mjs`) — writes a **self-contained HTML page** of
 every spec: lifecycle bars, acceptance-criteria completion, a needs-attention list ordered by
 severity, duplicate spec numbers, and a searchable/filterable table. Crucially it also shows
@@ -212,8 +253,9 @@ diff stays reviewable on its own. Idempotent. No network calls — it runs entir
 **MCP server** (`mcp/`) — the deterministic half, for any MCP client (Cursor, a custom agent, CI),
 read-only and dependency-free: `estate_lookup` (who produces/consumes a contract), `knowledge_check`
 (do the docs still match the code), `spec_list`, `spec_next_number` (collision-safe across
-branches), plus the templates as `sdd://` resources. The agents, skills, and hooks have no MCP
-equivalent and stay in the plugin — see [mcp/README.md](mcp/README.md). `knowledge_check` imports
+branches), plus the templates as `sdd://` resources and all 18 commands as MCP prompts, with the
+agents they delegate to inlined. Skills, hooks, and real subagent execution have no MCP equivalent
+and stay in the plugin — see [mcp/README.md](mcp/README.md). `knowledge_check` imports
 the CI gate's implementation rather than copying it, so the two can't drift.
 
 **Templates** (`templates/`) — seeded/filled into each repo by `/sdd-init`: spec README/TEMPLATE/AGENTS,
@@ -223,23 +265,33 @@ the CI gate's implementation rather than copying it, so the two can't drift.
 ## Install (per developer / per repo)
 
 ```
-/plugin marketplace add MLMCPS/ace-claude-plugins
+/plugin marketplace add MLMCPS/sdd-toolkit
 /plugin install sdd-toolkit@ace-tools
 ```
+
+That's the public release mirror — no repo access, org membership, or token. Both commands default
+to `--scope user`, so one run covers every project on your machine.
 
 Or make it automatic for a repo by committing `.claude/settings.json`:
 
 ```json
 {
   "extraKnownMarketplaces": {
-    "ace-tools": { "source": { "source": "github", "repo": "MLMCPS/ace-claude-plugins" }, "autoUpdate": true }
+    "ace-tools": { "source": { "source": "github", "repo": "MLMCPS/sdd-toolkit" }, "autoUpdate": true }
   },
-  "enabledPlugins": ["sdd-toolkit@ace-tools"]
+  "enabledPlugins": { "sdd-toolkit@ace-tools": true },
+  "attribution": { "commit": "", "pr": "" }
 }
 ```
 
 Teammates who clone a repo with that file get the plugin installed automatically (after trusting
-the workspace).
+the workspace). A `github` source is the only kind that works from a committed settings file — a
+`directory` source stores an absolute path, and an `npm` source is silently ignored by the client.
+
+**Don't also add `.mcp.json`.** The MCP server is bundled in the plugin; declaring it separately
+registers a second copy that updates on a different schedule and will eventually disagree with the
+first. The standalone `@mlmcps/sdd-mcp` package is for clients with no plugin system — Cursor,
+VS Code's Copilot, CI.
 
 ## First-time setup in a new service
 
@@ -252,5 +304,8 @@ Then use the loop: `/spec <ticket>` → review → `/spec-advance … Approved` 
 
 ## Updating
 
-Bump `version` in `.claude-plugin/plugin.json` and the marketplace entry, push. Repos with
-`autoUpdate: true` pick it up; others run `/plugin marketplace update ace-tools`.
+Consumers: repos with `autoUpdate: true` pick up a new version on the next launch; everyone else
+runs `/plugin marketplace update ace-tools`. Restart Claude Code to apply it.
+
+Maintainers: run `/release` in the marketplace repo. The version lives in **five** files and a tag
+publishes to three channels — see that repo's README rather than bumping by hand.

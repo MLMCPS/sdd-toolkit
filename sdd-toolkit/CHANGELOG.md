@@ -4,6 +4,144 @@ All notable changes to this plugin. Bump `version` in `.claude-plugin/plugin.jso
 **and** the `ace-tools` entry in `../.claude-plugin/marketplace.json` together on each release —
 `release.yml` checks all three against the tag and refuses to publish if any disagrees.
 
+## [0.21.0]
+
+### Added
+- **The MCP server now serves the plugin's commands as prompts**, so a client outside Claude Code
+  gets the workflow and not just the lookups. Until now `@mlmcps/sdd-mcp` exposed four read-only
+  tools and nothing else: someone wiring it into Cursor or a custom agent could ask *what specs
+  exist* but had no `/spec`, `/spec-build` or `/code` to act on the answer. The commands were
+  already the shape of an MCP prompt — frontmatter over a body with an `$ARGUMENTS` placeholder —
+  so they are served as one. All 18 arrive, described from their own frontmatter.
+
+  Clients namespace MCP prompts, so `spec` shows up as `/mcp__sdd-toolkit__spec`, not `/spec`.
+  That is the client's doing and cannot be opted out of.
+
+- **Agents a command delegates to are inlined into the prompt.** Several commands hand real work
+  to a subagent, and MCP has no way to register one — so those steps would have silently done
+  nothing, which is the worst failure available here: the command appears to run and quietly skips
+  its adversarial pass. Any agent a command names in bold now has its instructions appended to the
+  prompt under a heading that says why. The client follows them inline, losing the isolated
+  context, tool restrictions and parallelism the plugin gets. `/spec-fanout` degrades most, being
+  parallel by design.
+
+  Matching the bolded name in the command's prose, rather than adding a machine-readable field,
+  is deliberate: it is the same string a reader of the command sees, so the two halves cannot
+  drift apart without the prose being wrong too.
+
+- **Protocol tests for the MCP server** (`mcp/sdd-server.test.mjs`), which had none. They drive it
+  the way a client does — spawn the process, write newline-delimited JSON-RPC to stdin, read the
+  replies — so they also catch the one failure a unit test cannot: the server not starting at all.
+
+### Changed
+- `commands/` and `agents/` are now part of the `@mlmcps/sdd-mcp` package, since the prompts are
+  read from them at runtime. Both directories are already on the public mirror, so this discloses
+  nothing new. Skills, hooks, and the plugin's real subagent execution remain Claude Code only.
+
+## [0.20.1]
+
+### Fixed
+- **`/nfr` and `/spec-fanout` were missing from the plugin's own description**, so the two commands
+  0.20.0 added shipped invisible: the description is the command list a user sees in the marketplace
+  and in `/plugin`, and neither new command appeared in it. They worked perfectly for anyone who
+  already knew they existed, which is not how anyone finds a command.
+
+  The cause is worth recording because it will recur otherwise. Two manifests carry that list —
+  `plugin.json` and the `marketplace.json` entry — and nothing kept either in step with `commands/`.
+  Preparing 0.20.0 one was updated and the other was not, and every existing check passed: the
+  release gate verifies versions, and this is not a version. `validate-plugin.mjs` now fails when a
+  command is missing from either description, and warns when a description names one that no longer
+  exists, so the next release cannot repeat it.
+
+  Git-source installs were unaffected — they resolve from the default branch, which had the fix
+  within the hour. This release is for the npm packages and the public mirror, where 0.20.0 is
+  immutable.
+
+## [0.20.0]
+
+### Added
+- **The chain from ticket to test case is now checkable — `scripts/spec-trace.mjs`.**
+  `spec-gate.mjs` already checked that a spec's claimed evidence exists on disk. Nothing checked
+  that the branch, the pull-request title and the test-case ids all carry the *same* spec id — which
+  is the chain an auditor actually asks about, and the way it silently stops being true is a
+  hand-typed branch name. Every downstream id is now produced by a function with a matching parser,
+  so a link that lost the key is a parse failure rather than a divergence nobody notices. Exits
+  non-zero, so it gates a pull request.
+
+  It reports **broken** and **unverifiable** separately, and that distinction is deliberate. A
+  `Ticket` typed into a spec's header table cannot be checked from inside the repo; counting it as
+  passing would make the whole report a lie, so it is named as unchecked instead.
+
+- **`/nfr` — non-functional requirements stop vanishing.** NFRs are the requirements most likely to
+  be agreed and then lost, because they do not decompose into user stories: a story breakdown
+  flattens "the API shall be performant" into prose that nothing checks, and nobody notices until
+  the load test that was never written would have caught it. This compiles each NFR into the two
+  things that actually enforce it — a standing constraint in `docs/CONSTRAINTS.md`, and a blocking
+  pipeline gate — and **refuses** one with no machine-checkable threshold, because an NFR nothing
+  can fail is not a requirement. It also fails when an NFR id has been written into an acceptance
+  criterion, which is the exact moment enforcement turns back into a sentence.
+
+  The constraints it writes are carried into the next spec automatically, so a rule agreed in
+  August is in front of whoever writes a spec in November without anyone remembering it exists.
+
+- **`/spec-fanout` — a change spanning four services is one change, provably.** Today that is four
+  pull requests a reviewer correlates by hand and hopes they got right. Every branch in a fan-out
+  now carries the same derived name, and `docs/ESTATE.md` supplies the consumers — including the
+  service one hop out that nobody remembered. Plans first, then `--dry-run` prints the exact
+  requests, then opens them. Partial failure is reported rather than thrown: a permissions error on
+  the fourth repository must not hide that three succeeded.
+
+- **`scripts/branch-policy.mjs` — the gate can be checked for still being a gate.** A pipeline that
+  runs and reports changes nothing; the load-bearing artifact is the branch policy. The quiet
+  failure mode is someone demoting it to advisory to unblock a release on a Friday — nothing breaks,
+  no test fails, and merges simply stop being gated until an audit finds the holes months later.
+  `install` has no flag that can produce an advisory gate, and `audit` treats advisory, disabled,
+  `manualQueueOnly` and GitHub's `enforce_admins: false` as blockers rather than warnings.
+
+- **`scripts/tracker-sync.mjs` — governed sync with Azure DevOps or Jira.** A spec and a work item
+  can both hold a title, a status and a list of criteria; two stores for one truth diverge silently.
+  Exactly one system may now write each field — the spec owns the contract, the tracker owns status,
+  assignee and sprint — and an attempt to write the other's field is refused rather than winning.
+
+- **`scripts/spec-brief.mjs` — the handoff to whoever implements a spec.** An approved spec is a
+  contract, but a scattered one: the criteria are in one section, the constraints in force in
+  another file, the gates that will fail the build in a third. The parts most often skipped are the
+  ones that cause the rework. This assembles them, and refuses a Draft spec — the contract is still
+  being negotiated. It is deliberately **not a prompt**: the same document for a person or an agent,
+  because anything an agent needs that a new engineer would not is a sign the spec is
+  underspecified, and that fix belongs in the spec.
+
+- **`templates/ci/spec-gate.yml` and `templates/ci/azure-pipelines-spec-gate.yml`** — the merge gate
+  for both hosts. Both carry the same adoption note as `knowledge-layer.yml`: run it non-blocking
+  for a fortnight first, because a gate that fails on day one gets disabled on day two. The Azure
+  one audits its own branch policy on every run, which is the only check that survives someone
+  changing that setting.
+
+- **The first tests in this package — 99 of them**, on Node's built-in runner, no dependencies.
+  They run offline: the tracker and source-control clients take an injectable transport, so the
+  documents they build are asserted without credentials. `npm test` runs them.
+
+### Changed
+- **`scripts/lib/specs.mjs` gains `criteria[]`, `repos`, `nfrs`, `approvedBy` and `author`.**
+  Additive only — `mcp/sdd-server.mjs` and `spec-dashboard.mjs` both read this shape and are
+  unaffected. Acceptance criteria now parse as structured rows, so a script can pair each with its
+  test case rather than counting checkboxes.
+
+### Fixed
+- **Test files would have shipped in the `@mlmcps/sdd-mcp` tarball.** `files[]` includes
+  `scripts/lib/` wholesale, so the new `*.test.mjs` files were being packaged. Excluded via a
+  negation pattern; `npm pack --dry-run` now contains none.
+
+### Notes
+- The Azure DevOps, Jira and GitHub clients are **contract-tested, not integration-tested**. They
+  build what ADO 7.1, Jira Cloud v3 and GitHub 2022-11-28 document, verified offline against a
+  recording transport. **None has run against a live organisation.** Every write path has
+  `--dry-run`, which prints the exact requests and needs no credentials — which is also the thing
+  to hand whoever has to approve an access token.
+- The read/write split is enforced at runtime, not by convention: the read-only tracker and SCM
+  clients are frozen objects carrying only read methods, so a write path from the planning side is
+  absent and cannot be re-attached.
+
 ## [0.19.0]
 
 ### Changed
